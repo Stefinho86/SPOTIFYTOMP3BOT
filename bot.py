@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 
 MENU, ENTER_QUERY, SHOW_RESULTS = range(3)
 
-# --- Crea client Spotify
 def get_spotify():
     return spotipy.Spotify(
         auth_manager=SpotifyClientCredentials(
@@ -168,22 +167,19 @@ async def show_results(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
     for idx, r in enumerate(paginated, start=1):
         if r['type'] == 'track':
-            msg += f"*{idx}. {r['name']}* \n   _Artista:_ {r['artists']}\n"
+            msg += f"*{idx}.* {r['name']} \n   _Artista:_ {r['artists']}\n"
         elif r['type'] == 'album':
-            msg += f"*{idx}. Album: {r['name']}* \n   _Artista:_ {r['artists']}\n"
+            msg += f"*{idx}.* Album: {r['name']} \n   _Artista:_ {r['artists']}\n"
         elif r['type'] == 'playlist':
-            msg += f"*{idx}. Playlist: {r['name']}* \n   _Owner:_ {r['owner']}\n"
+            msg += f"*{idx}.* Playlist: {r['name']} \n   _Owner:_ {r['owner']}\n"
         elif r['type'] == 'artist':
-            msg += f"*{idx}. Artista: {r['name']}*\n"
+            msg += f"*{idx}.* Artista: {r['name']}\n"
     msg += "\nScegli cosa scaricare dai pulsanti qui sotto."
-    # Pulsanti scarica
     for i, r in enumerate(paginated):
-        # Solo per artist non mostriamo il pulsante download
         if r['type'] == 'artist':
             keyboard.append([InlineKeyboardButton(f"Visualizza", url=r['url'])])
         else:
             keyboard.append([InlineKeyboardButton(f"Scarica {i+1}", callback_data=f"dl_{start+i}")])
-    # Navigazione
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("⬅️ Indietro", callback_data="prev"))
@@ -216,29 +212,33 @@ async def show_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("dl_"):
         idx = int(data[3:])
         result = context.user_data['results'][idx]
-        url = result['url']
+        spotify_url = result['url']
         name = result['name']
-        await query.edit_message_text(f"Scaricamento da SpotifyMate in corso per {name}...")
-        mp3_urls = get_mp3_from_spotimate(url)
-        if not mp3_urls:
-            await query.message.reply_text("❌ Impossibile recuperare download da SpotifyMate.")
+        artist = result.get('artists', result.get('owner', ''))
+        await query.edit_message_text(f"Sto cercando di scaricare *{name}* da SpotiDownloader...", parse_mode="Markdown")
+        mp3_link = get_mp3_from_spotidownloader(spotify_url)
+        if not mp3_link:
+            await query.message.reply_text("❌ Download non riuscito. Potrebbe essere attivo un reCAPTCHA o la traccia non è disponibile. Prova da browser o riprova più tardi.")
             await manda_menu(query)
             return MENU
-        for mp3_url in mp3_urls:
-            try:
-                temp_fd, temp_path = tempfile.mkstemp(suffix=".mp3")
-                os.close(temp_fd)
-                r = requests.get(mp3_url, stream=True, timeout=60)
-                with open(temp_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                with open(temp_path, "rb") as f:
-                    await query.message.reply_audio(audio=f, title=name)
-                os.remove(temp_path)
-            except Exception as e:
-                logger.error(f"Errore download mp3: {e}")
-                await query.message.reply_text("Errore durante il download del file mp3.")
-        await query.message.reply_text("✅ Download completato.")
+        try:
+            temp_fd, temp_path = tempfile.mkstemp(suffix=".mp3")
+            os.close(temp_fd)
+            r = requests.get(mp3_link, stream=True, timeout=60)
+            with open(temp_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            with open(temp_path, "rb") as fmp3:
+                await query.message.reply_audio(
+                    audio=fmp3,
+                    title=name,
+                    performer=artist
+                )
+            os.remove(temp_path)
+            await query.message.reply_text("✅ Download completato.")
+        except Exception as e:
+            logger.error(f"Errore download mp3: {e}")
+            await query.message.reply_text("Errore durante il download del file mp3.")
         await manda_menu(query)
         return MENU
     elif data == "annulla":
@@ -250,25 +250,31 @@ async def show_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await manda_menu(query)
         return MENU
 
-def get_mp3_from_spotimate(spotify_url):
+def get_mp3_from_spotidownloader(spotify_url):
     session = requests.Session()
-    main_url = "https://spotimate.io/it"
+    main_url = "https://spotidownloader.com/it"
     try:
+        # Step 1: accedi alla home per ottenere eventuali cookie
+        session.get(main_url, headers={"User-Agent": "Mozilla/5.0"})
+        # Step 2: invia la POST (molti siti usano POST, ma può essere GET)
         resp = session.post(
             main_url,
             data={"url": spotify_url},
             headers={"User-Agent": "Mozilla/5.0"}
         )
+        # Step 3: controlla se c'è reCAPTCHA nella risposta
+        if "g-recaptcha" in resp.text.lower():
+            logger.warning("reCAPTCHA rilevato, download impossibile.")
+            return None
         soup = BeautifulSoup(resp.text, "html.parser")
-        mp3_links = []
-        # Cerca link mp3 nei bottoni di download
+        # Cerca il link download mp3 (di solito con testo o href che termina con .mp3)
         for a in soup.find_all("a"):
             href = a.get("href", "")
-            if href.endswith(".mp3"):
-                mp3_links.append(href)
-        return mp3_links
+            if ".mp3" in href:
+                return href
+        return None
     except Exception as e:
-        logger.exception("Errore nell'accesso a SpotifyMate")
+        logger.exception("Errore nell'accesso a SpotiDownloader")
         return None
 
 async def annulla(update: Update, context: ContextTypes.DEFAULT_TYPE):
