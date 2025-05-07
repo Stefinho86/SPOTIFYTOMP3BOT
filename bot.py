@@ -3,7 +3,8 @@ import logging
 import tempfile
 import requests
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 )
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
@@ -14,18 +15,19 @@ import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 from bs4 import BeautifulSoup
 
+# --- Carica variabili ambiente
 load_dotenv()
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MENU, CHOOSE_MODE, ENTER_QUERY, SHOW_RESULTS = range(4)
+MENU, ENTER_QUERY, SHOW_RESULTS = range(3)
 
-SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID")
-SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-
-def get_spotify_client():
+# --- Crea client Spotify
+def get_spotify():
     return spotipy.Spotify(
         auth_manager=SpotifyClientCredentials(
             client_id=SPOTIFY_CLIENT_ID,
@@ -35,9 +37,9 @@ def get_spotify_client():
 
 def main_keyboard():
     return ReplyKeyboardMarkup([
-        [KeyboardButton("🎵 Cerca titolo"), KeyboardButton("🎤 Cerca artista")],
-        [KeyboardButton("💿 Cerca album"), KeyboardButton("📜 Cerca playlist")],
-        [KeyboardButton("❌ Esci")]
+        ["🎵 Brano", "🎤 Artista"],
+        ["💿 Album", "📜 Playlist"],
+        ["❌ Esci"]
     ], resize_keyboard=True)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -58,7 +60,7 @@ async def manda_menu(update):
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.lower()
-    if "titolo" in text:
+    if "brano" in text or ("cerca" in text and "titolo" in text):
         context.user_data['mode'] = "track"
         await update.message.reply_text("Inserisci il titolo del brano da cercare:", reply_markup=ReplyKeyboardMarkup([["Annulla"]], resize_keyboard=True))
         return ENTER_QUERY
@@ -96,11 +98,12 @@ async def enter_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return MENU
 
     mode = context.user_data.get('mode')
-    sp = get_spotify_client()
+    sp = get_spotify()
     results = []
+
     try:
         if mode == "track":
-            res = sp.search(q=text, type='track', limit=15)
+            res = sp.search(q=text, type='track', limit=20)
             items = res['tracks']['items']
             for t in items:
                 results.append({
@@ -140,7 +143,7 @@ async def enter_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 })
     except Exception as e:
         logger.error(f"Errore ricerca Spotify: {e}")
-        await update.message.reply_text("Errore nella ricerca su Spotify.")
+        await update.message.reply_text("Errore nella ricerca su Spotify. Verifica le chiavi API.")
         return MENU
 
     if not results:
@@ -175,7 +178,11 @@ async def show_results(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     msg += "\nScegli cosa scaricare dai pulsanti qui sotto."
     # Pulsanti scarica
     for i, r in enumerate(paginated):
-        keyboard.append([InlineKeyboardButton(f"Scarica {i+1}", callback_data=f"dl_{start+i}")])
+        # Solo per artist non mostriamo il pulsante download
+        if r['type'] == 'artist':
+            keyboard.append([InlineKeyboardButton(f"Visualizza", url=r['url'])])
+        else:
+            keyboard.append([InlineKeyboardButton(f"Scarica {i+1}", callback_data=f"dl_{start+i}")])
     # Navigazione
     nav = []
     if page > 0:
@@ -217,17 +224,20 @@ async def show_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("❌ Impossibile recuperare download da SpotifyMate.")
             await manda_menu(query)
             return MENU
-        # Per semplificare: se è una lista prendi il primo, oppure scarica tutti
         for mp3_url in mp3_urls:
-            temp_fd, temp_path = tempfile.mkstemp(suffix=".mp3")
-            os.close(temp_fd)
-            r = requests.get(mp3_url, stream=True)
-            with open(temp_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            with open(temp_path, "rb") as f:
-                await query.message.reply_audio(audio=f, title=name)
-            os.remove(temp_path)
+            try:
+                temp_fd, temp_path = tempfile.mkstemp(suffix=".mp3")
+                os.close(temp_fd)
+                r = requests.get(mp3_url, stream=True, timeout=60)
+                with open(temp_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                with open(temp_path, "rb") as f:
+                    await query.message.reply_audio(audio=f, title=name)
+                os.remove(temp_path)
+            except Exception as e:
+                logger.error(f"Errore download mp3: {e}")
+                await query.message.reply_text("Errore durante il download del file mp3.")
         await query.message.reply_text("✅ Download completato.")
         await manda_menu(query)
         return MENU
@@ -250,8 +260,8 @@ def get_mp3_from_spotimate(spotify_url):
             headers={"User-Agent": "Mozilla/5.0"}
         )
         soup = BeautifulSoup(resp.text, "html.parser")
-        # Cerca tutti i link mp3
         mp3_links = []
+        # Cerca link mp3 nei bottoni di download
         for a in soup.find_all("a"):
             href = a.get("href", "")
             if href.endswith(".mp3"):
