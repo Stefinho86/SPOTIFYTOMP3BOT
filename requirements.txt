@@ -1,5 +1,5 @@
 python-telegram-bot==20.7
-spotipy
-python-dotenv
 requests
+vk_api
+python-dotenv
 beautifulsoup4
